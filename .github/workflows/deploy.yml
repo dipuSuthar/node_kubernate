@@ -1,0 +1,309 @@
+
+name: EKS CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: eks-cicd-demo
+  EKS_CLUSTER_NAME: eks-cicd-ap-south-1
+  K8S_NAMESPACE: app
+  HELM_RELEASE: eks-cicd-demo
+  HELM_CHART: helm/eks-cicd-demo
+
+jobs:
+  build-test-deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout source code
+      # ============================================================
+
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+
+      # ============================================================
+      # 2. Setup Node.js
+      # ============================================================
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+
+      # ============================================================
+      # 3. Install Node.js dependencies
+      # ============================================================
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+
+      # ============================================================
+      # 4. Run tests
+      # ============================================================
+
+      - name: Run tests
+        working-directory: app
+        run: npm test
+
+
+      # ============================================================
+      # 5. Configure AWS using GitHub OIDC
+      # ============================================================
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActions-EKS-Deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ============================================================
+      # 6. Verify AWS identity
+      # ============================================================
+
+      - name: Verify AWS identity
+        run: |
+          echo "===== AWS IDENTITY ====="
+          aws sts get-caller-identity
+
+          echo "===== AWS REGION ====="
+          aws configure get region
+
+
+      # ============================================================
+      # 7. Login to Amazon ECR
+      # ============================================================
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+
+      # ============================================================
+      # 8. Set Docker image variables
+      # ============================================================
+
+      - name: Set image variables
+        id: image
+        run: |
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_TAG="${GITHUB_SHA}"
+
+          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
+          echo "repository=${REGISTRY}/${ECR_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "ECR Registry: ${REGISTRY}"
+          echo "Image Repository: ${REGISTRY}/${ECR_REPOSITORY}"
+          echo "Image Tag: ${IMAGE_TAG}"
+
+
+      # ============================================================
+      # 9. Build Docker image
+      # ============================================================
+
+      - name: Build Docker image
+        working-directory: app
+        run: |
+          docker build \
+            -t ${{ steps.image.outputs.repository }}:${{ steps.image.outputs.tag }} \
+            -t ${{ steps.image.outputs.repository }}:latest \
+            .
+
+
+      # ============================================================
+      # 10. Push Docker image to ECR
+      # ============================================================
+
+      - name: Push Docker image
+        run: |
+          docker push \
+            ${{ steps.image.outputs.repository }}:${{ steps.image.outputs.tag }}
+
+          docker push \
+            ${{ steps.image.outputs.repository }}:latest
+
+
+      # ============================================================
+      # 11. Verify image exists in ECR
+      # ============================================================
+
+      - name: Verify ECR image
+        run: |
+          aws ecr describe-images \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${GITHUB_SHA}" \
+            --region "${AWS_REGION}"
+
+
+      # ============================================================
+      # 12. Configure kubectl for EKS
+      # ============================================================
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${EKS_CLUSTER_NAME}"
+
+
+      # ============================================================
+      # 13. Verify Kubernetes context
+      # ============================================================
+
+      - name: Verify Kubernetes context
+        run: |
+          echo "===== CURRENT CONTEXT ====="
+          kubectl config current-context
+
+          echo "===== EKS CLUSTER ====="
+          aws eks describe-cluster \
+            --name "${EKS_CLUSTER_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "cluster.status" \
+            --output text
+
+          echo "===== NODES ====="
+          kubectl get nodes -o wide
+
+
+      # ============================================================
+      # 14. Verify application namespace
+      # ============================================================
+
+      - name: Verify Kubernetes namespace
+        run: |
+          kubectl get namespace "${K8S_NAMESPACE}" || \
+          kubectl create namespace "${K8S_NAMESPACE}"
+
+
+      # ============================================================
+      # 15. Helm lint
+      # ============================================================
+
+      - name: Helm lint
+        run: |
+          helm lint "${HELM_CHART}"
+
+
+      # ============================================================
+      # 16. Render Helm templates
+      # ============================================================
+
+      - name: Helm template
+        run: |
+          helm template "${HELM_RELEASE}" "${HELM_CHART}" \
+            --namespace "${K8S_NAMESPACE}" \
+            --set image.repository="${{ steps.image.outputs.repository }}" \
+            --set image.tag="${{ steps.image.outputs.tag }}" \
+            --set image.pullPolicy=Always
+
+
+      # ============================================================
+      # 17. Deploy application using Helm
+      # ============================================================
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install "${HELM_RELEASE}" \
+            "${HELM_CHART}" \
+            --namespace "${K8S_NAMESPACE}" \
+            --create-namespace \
+            --set image.repository="${{ steps.image.outputs.repository }}" \
+            --set image.tag="${{ steps.image.outputs.tag }}" \
+            --set image.pullPolicy=Always \
+            --wait \
+            --timeout 10m
+
+
+      # ============================================================
+      # 18. Check Helm release
+      # ============================================================
+
+      - name: Verify Helm release
+        run: |
+          helm status "${HELM_RELEASE}" \
+            --namespace "${K8S_NAMESPACE}"
+
+
+      # ============================================================
+      # 19. Verify deployment
+      # ============================================================
+
+      - name: Verify deployment
+        run: |
+          echo "===== PODS ====="
+          kubectl get pods \
+            -n "${K8S_NAMESPACE}" \
+            -o wide
+
+          echo "===== DEPLOYMENT ====="
+          kubectl get deployment \
+            -n "${K8S_NAMESPACE}"
+
+          echo "===== SERVICE ====="
+          kubectl get service \
+            -n "${K8S_NAMESPACE}"
+
+          echo "===== INGRESS ====="
+          kubectl get ingress \
+            -n "${K8S_NAMESPACE}"
+
+
+      # ============================================================
+      # 20. Wait for rollout
+      # ============================================================
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status \
+            deployment/eks-cicd-demo \
+            -n "${K8S_NAMESPACE}" \
+            --timeout=10m
+
+
+      # ============================================================
+      # 21. Final application verification
+      # ============================================================
+
+      - name: Final verification
+        run: |
+          echo "=========================================="
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "=========================================="
+
+          echo "===== PODS ====="
+          kubectl get pods \
+            -n "${K8S_NAMESPACE}" \
+            -o wide
+
+          echo "===== SERVICE ====="
+          kubectl get svc \
+            -n "${K8S_NAMESPACE}"
+
+          echo "===== INGRESS / ALB ====="
+          kubectl get ingress \
+            -n "${K8S_NAMESPACE}"
+
+          echo "===== HELM ====="
+          helm list \
+            -n "${K8S_NAMESPACE}"
