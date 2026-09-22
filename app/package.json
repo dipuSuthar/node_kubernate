@@ -1,0 +1,21 @@
+{
+  "name": "node-eks-app",
+  "version": "1.0.0",
+  "description": "Simple Node.js server for AWS EKS deployment via Helm",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "node",
+    "express",
+    "eks",
+    "kubernetes",
+    "helm"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
