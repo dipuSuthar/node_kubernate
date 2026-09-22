@@ -14,6 +14,7 @@ permissions:
 
 env:
   AWS_REGION: ap-south-1
+  AWS_ACCOUNT_ID: "330124996327"
   ECR_REPOSITORY: eks-cicd-demo
   EKS_CLUSTER_NAME: eks-cicd-ap-south-1
   K8S_NAMESPACE: app
@@ -21,9 +22,10 @@ env:
   HELM_CHART: helm/eks-cicd-demo
 
 jobs:
+
   build-test-deploy:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
 
@@ -43,12 +45,10 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: app/package-lock.json
 
 
       # ============================================================
-      # 3. Install Node.js dependencies
+      # 3. Install dependencies
       # ============================================================
 
       - name: Install dependencies
@@ -72,7 +72,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActions-EKS-Deploy
+          role-to-assume: arn:aws:iam::330124996327:role/GitHubActions-EKS-Deploy
           aws-region: ${{ env.AWS_REGION }}
 
 
@@ -99,22 +99,21 @@ jobs:
 
 
       # ============================================================
-      # 8. Set Docker image variables
+      # 8. Set image variables
       # ============================================================
 
       - name: Set image variables
         id: image
         run: |
           REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_REPOSITORY="${REGISTRY}/${ECR_REPOSITORY}"
           IMAGE_TAG="${GITHUB_SHA}"
 
           echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
-          echo "repository=${REGISTRY}/${ECR_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "repository=${IMAGE_REPOSITORY}" >> "$GITHUB_OUTPUT"
           echo "tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
-          echo "ECR Registry: ${REGISTRY}"
-          echo "Image Repository: ${REGISTRY}/${ECR_REPOSITORY}"
-          echo "Image Tag: ${IMAGE_TAG}"
+          echo "Image: ${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 
 
       # ============================================================
@@ -125,26 +124,26 @@ jobs:
         working-directory: app
         run: |
           docker build \
-            -t ${{ steps.image.outputs.repository }}:${{ steps.image.outputs.tag }} \
-            -t ${{ steps.image.outputs.repository }}:latest \
+            -t "${{ steps.image.outputs.repository }}:${{ steps.image.outputs.tag }}" \
+            -t "${{ steps.image.outputs.repository }}:latest" \
             .
 
 
       # ============================================================
-      # 10. Push Docker image to ECR
+      # 10. Push image to ECR
       # ============================================================
 
       - name: Push Docker image
         run: |
           docker push \
-            ${{ steps.image.outputs.repository }}:${{ steps.image.outputs.tag }}
+            "${{ steps.image.outputs.repository }}:${{ steps.image.outputs.tag }}"
 
           docker push \
-            ${{ steps.image.outputs.repository }}:latest
+            "${{ steps.image.outputs.repository }}:latest"
 
 
       # ============================================================
-      # 11. Verify image exists in ECR
+      # 11. Verify ECR image
       # ============================================================
 
       - name: Verify ECR image
@@ -156,7 +155,7 @@ jobs:
 
 
       # ============================================================
-      # 12. Configure kubectl for EKS
+      # 12. Configure kubectl
       # ============================================================
 
       - name: Configure kubectl
@@ -167,30 +166,23 @@ jobs:
 
 
       # ============================================================
-      # 13. Verify Kubernetes context
+      # 13. Verify EKS
       # ============================================================
 
-      - name: Verify Kubernetes context
+      - name: Verify Kubernetes access
         run: |
           echo "===== CURRENT CONTEXT ====="
           kubectl config current-context
-
-          echo "===== EKS CLUSTER ====="
-          aws eks describe-cluster \
-            --name "${EKS_CLUSTER_NAME}" \
-            --region "${AWS_REGION}" \
-            --query "cluster.status" \
-            --output text
 
           echo "===== NODES ====="
           kubectl get nodes -o wide
 
 
       # ============================================================
-      # 14. Verify application namespace
+      # 14. Verify namespace
       # ============================================================
 
-      - name: Verify Kubernetes namespace
+      - name: Verify namespace
         run: |
           kubectl get namespace "${K8S_NAMESPACE}" || \
           kubectl create namespace "${K8S_NAMESPACE}"
@@ -206,7 +198,7 @@ jobs:
 
 
       # ============================================================
-      # 16. Render Helm templates
+      # 16. Helm template validation
       # ============================================================
 
       - name: Helm template
@@ -219,7 +211,7 @@ jobs:
 
 
       # ============================================================
-      # 17. Deploy application using Helm
+      # 17. Deploy with Helm
       # ============================================================
 
       - name: Deploy with Helm
@@ -236,7 +228,7 @@ jobs:
 
 
       # ============================================================
-      # 18. Check Helm release
+      # 18. Verify Helm
       # ============================================================
 
       - name: Verify Helm release
@@ -246,7 +238,7 @@ jobs:
 
 
       # ============================================================
-      # 19. Verify deployment
+      # 19. Verify Kubernetes resources
       # ============================================================
 
       - name: Verify deployment
@@ -270,7 +262,7 @@ jobs:
 
 
       # ============================================================
-      # 20. Wait for rollout
+      # 20. Verify rollout
       # ============================================================
 
       - name: Verify rollout
@@ -282,13 +274,13 @@ jobs:
 
 
       # ============================================================
-      # 21. Final application verification
+      # 21. Final verification
       # ============================================================
 
       - name: Final verification
         run: |
           echo "=========================================="
-          echo "DEPLOYMENT SUCCESSFUL"
+          echo "CI/CD DEPLOYMENT SUCCESSFUL"
           echo "=========================================="
 
           echo "===== PODS ====="
@@ -307,3 +299,4 @@ jobs:
           echo "===== HELM ====="
           helm list \
             -n "${K8S_NAMESPACE}"
+
